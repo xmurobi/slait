@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -46,6 +47,11 @@ func (c *connection) WriteJSON(v interface{}) error {
 	return c.ws.WriteJSON(v)
 }
 
+func (c *connection) ReadMessage() (messageType int, p []byte, err error) {
+	c.ws.SetReadDeadline(time.Now().Add(pongWait))
+	return c.ws.ReadMessage()
+}
+
 func (c *connection) ReadJSON(v interface{}) error {
 	c.ws.SetReadDeadline(time.Now().Add(pongWait))
 	return c.ws.ReadJSON(v)
@@ -76,6 +82,7 @@ type SocketMessage struct {
 	Topic      string
 	Partitions []string
 	From       time.Time
+	Data       cache.Entries
 }
 
 type subscription struct {
@@ -106,9 +113,9 @@ func (s *subscription) shouldReceive(topic, partition string) (should bool) {
 	return should
 }
 
-func (s *subscription) cleanup() {
+func (s *subscription) cleanup(closeMsg string) {
 	if atomic.CompareAndSwapUint32(&s.conn.done, 0, 1) {
-		s.conn.WriteMessage(websocket.CloseMessage, []byte{})
+		s.conn.WriteMessage(websocket.CloseMessage, []byte(closeMsg))
 		defer Log(INFO, "Unsubscribed %v", s.conn.GetAddress())
 		hub.unsubscribe(s)
 		s.done <- struct{}{}
@@ -122,7 +129,7 @@ func (s *subscription) cleanup() {
 }
 
 func (s *subscription) consume() {
-	defer s.cleanup()
+	defer s.cleanup("")
 	s.conn.ws.SetPongHandler(func(string) error {
 		s.conn.ws.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
@@ -136,10 +143,11 @@ func (s *subscription) consume() {
 			}
 			return
 		}
+
 		switch strings.ToLower(m.Action) {
-		case "unsubscribe":
-			return
-		default:
+		// case "unsubscribe":
+		// 	return
+		case "subscribe":
 			// update the subscription
 			val, loaded := s.m.LoadOrStore(m.Topic, m.Partitions)
 			if loaded {
@@ -147,13 +155,60 @@ func (s *subscription) consume() {
 				s.m.Store(m.Topic, append(partitions, m.Partitions...))
 			}
 			s.from = m.From
-			hub.subscribe(s)
+			hub.subscribe(s, false)
+
+		case "publish":
+			occupied := false
+			closemsg := ""
+
+			hub.publications.Range(func(key interface{}, value interface{}) bool {
+				pub := key.(*subscription)
+				for _, p := range m.Partitions {
+					// Test if other publisher already occupy the topic/partition pair
+					if pub.shouldReceive(m.Topic, p) {
+						occupied = true
+						closemsg = fmt.Sprintf("Topic %v and Partition %v occupied by other publisher", m.Topic, p)
+						return false
+					}
+				}
+				return true
+			})
+
+			if occupied {
+				// Notify the client that topic/partition pair already occupied
+				// by other publishers. We close the connection for this client
+				// once we find overlap on topic/partition due to we don't want
+				// to double check the publish stream later for performance issue.
+
+				s.cleanup(closemsg)
+				Log(INFO, "Rejected new publisher due to %v", closemsg)
+			} else {
+
+				val, loaded := s.m.LoadOrStore(m.Topic, m.Partitions)
+				if loaded {
+					partitions := val.([]string)
+					s.m.Store(m.Topic, append(partitions, m.Partitions...))
+				}
+				s.from = m.From
+
+				hub.subscribe(s, true)
+
+				Log(INFO, "New publisher connected for Topic: %v and Partitions: %v", m.Topic, strings.Join(m.Partitions, "/"))
+
+			}
+
+		case "pub":
+
+			if len(m.Topic) > 0 && len(m.Partitions) > 0 && len(m.Data) > 0 {
+				cache.Append(m.Topic, m.Partitions[0], m.Data)
+			}
+
 		}
 	}
 }
 
 func (s *subscription) produce() {
-	defer s.cleanup()
+	defer s.cleanup("")
 	ticker := time.NewTicker(pingPeriod)
 	for {
 		select {
@@ -178,15 +233,62 @@ func (s *subscription) produce() {
 type Hub struct {
 	sync.RWMutex
 	subscriptions sync.Map
+	publications  sync.Map
 }
 
 func (h *Hub) unsubscribe(s *subscription) {
-	h.subscriptions.Delete(s)
+	if _, ok := h.subscriptions.Load(s); ok {
+
+		h.subscriptions.Delete(s)
+
+	} else if _, ok := h.publications.Load(s); ok {
+
+		h.publications.Delete(s)
+
+		s.m.Range(func(key interface{}, value interface{}) bool {
+			topic := key.(string)
+			partitions := value.([]string)
+
+			if len(topic) > 0 && len(partitions) > 0 {
+				for _, p := range partitions {
+					cache.Update(topic, p, cache.RemovePartition)
+				}
+			}
+
+			return true
+		})
+
+	}
 }
 
-func (h *Hub) subscribe(s *subscription) {
-	h.subscriptions.Store(s, true)
-	h.dump(s)
+func (h *Hub) subscribe(s *subscription, isPublisher bool) {
+	if !isPublisher {
+		h.subscriptions.Store(s, true)
+		h.dump(s)
+
+	} else {
+		h.publications.Store(s, true)
+
+		s.m.Range(func(key interface{}, value interface{}) bool {
+			topic := key.(string)
+			partitions := value.([]string)
+
+			if len(topic) > 0 && len(partitions) > 0 {
+
+				cache.Add(topic)
+
+				for _, p := range partitions {
+					cache.Update(topic, p, cache.AddPartition)
+				}
+			}
+
+			return true
+		})
+
+		s.conn.WriteJSON(SocketMessage{
+			Action: "ready",
+		})
+	}
 }
 
 func (h *Hub) dump(s *subscription) {
@@ -278,6 +380,7 @@ func (h *Hub) run() {
 
 var hub = Hub{
 	subscriptions: sync.Map{},
+	publications:  sync.Map{},
 }
 
 type SocketHandler struct{}
@@ -300,7 +403,7 @@ func (sh *SocketHandler) Serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.conn.ws != nil {
-		Log(INFO, "New subscriber: %v", s.conn.GetAddress())
+		Log(INFO, "New client: %v", s.conn.GetAddress())
 	}
 	go s.consume()
 	go s.produce()
@@ -312,3 +415,4 @@ func GetHandler() *SocketHandler {
 	sh := &SocketHandler{}
 	return sh
 }
+

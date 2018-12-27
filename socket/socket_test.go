@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eapache/channels"
+
 	"github.com/alpacahq/slait/cache"
 
 	"github.com/gorilla/websocket"
@@ -62,13 +64,15 @@ func (s *SocketTestSuite) TestSocket(c *C) {
 				// fmt.Println("Publication:", pm)
 				pubsReceived++
 			}
-			// fmt.Printf("Pubs: %v Socks: %v\n", pubsReceived, sockMsgsReceived)
 			if pubsReceived >= 6 && sockMsgsReceived >= 4 {
 				done <- struct{}{}
 			}
 		}
 	}()
-	err = conn.WriteJSON(SocketMessage{Topic: "bars"})
+	err = conn.WriteJSON(SocketMessage{
+		Action: "subscribe",
+		Topic:  t1, /*"bars"*/
+	})
 	if err != nil {
 		c.Fatalf("Cannot write JSON message to websocket: %v", err)
 	}
@@ -106,6 +110,142 @@ func (s *SocketTestSuite) TestSocket(c *C) {
 	}
 }
 
+func (s *SocketTestSuite) TestPubSub(c *C) {
+	done := make(chan struct{})
+
+	// server
+	cache.Build(c.MkDir())
+	handler := GetHandler()
+	srv := httptest.NewServer(http.HandlerFunc(handler.Serve))
+	u, _ := url.Parse(srv.URL)
+	u.Scheme = "ws"
+
+	// publisher
+	pubconn := connect(u)
+	if pubconn == nil {
+		c.Fatalf("Pubisher cannot connect to websocket")
+	}
+
+	// subscriber
+	subconn := connect(u)
+	if subconn == nil {
+		c.Fatalf("Subscriber cannot connect to websocket")
+	}
+
+	sampleCounter := 0
+
+	go func() {
+		for {
+			sm := SocketMessage{}
+			pm := cache.Publication{}
+			_, msg, err := subconn.ReadMessage()
+			if err != nil {
+				c.Fatalf("Failed to read from websocket: %v", err)
+			}
+			err = json.Unmarshal(msg, &pm)
+			if pm.Entries.Len() == 0 {
+				err = json.Unmarshal(msg, &sm)
+				if err != nil {
+					c.Fatalf("Received an invalid message that couldn't be unmarshalled: %v", err)
+				}
+				fmt.Println("Socket message:", sm)
+			} else {
+				fmt.Println("Subcriber got Publication:", pm)
+				subconn.done = 1
+			}
+
+			if subconn.done > 0 && pubconn.done > 0 {
+				done <- struct{}{}
+			}
+		}
+	}()
+	err := subconn.WriteJSON(SocketMessage{
+		Action:     "subscribe",
+		Topic:      "ABC",
+		Partitions: []string{"A", "B", "C"},
+	})
+	if err != nil {
+		c.Fatalf("Cannot write JSON message to websocket: %v", err)
+	} else {
+		fmt.Println("Subscriber connected to server")
+	}
+
+	// publisher
+
+	go func() {
+		for {
+			sm := SocketMessage{}
+			err := pubconn.ReadJSON(&sm)
+			if err != nil {
+				c.Fatalf("Failed to read from websocket: %v", err)
+			}
+
+			if sm.Action == "ready" {
+				sm := SocketMessage{
+					Action:     "pub",
+					Topic:      "ABC",
+					Partitions: []string{"A"},
+					Data:       cache.GenData(),
+				}
+				err := pubconn.WriteJSON(sm)
+				if err != nil {
+					c.Fatalf("Failed to publish to websocket: %v", err)
+				} else {
+					fmt.Println("Pubisher sent data to server")
+				}
+
+				pubconn.done = 1
+			}
+		}
+	}()
+
+	err = pubconn.WriteJSON(SocketMessage{
+		Action:     "publish",
+		Topic:      "ABC",
+		Partitions: []string{"A"},
+	})
+
+	if err != nil {
+		c.Fatalf("Cannot write JSON message to websocket: %v", err)
+	} else {
+		fmt.Println("Pubisher connected to server")
+	}
+
+	// finally
+	t := time.NewTicker(30 * time.Second)
+	select {
+	case <-done:
+		err = subconn.WriteMessage(websocket.CloseMessage, []byte{})
+		c.Assert(err, IsNil)
+		fmt.Println("Subscriber disconnected")
+		err = pubconn.WriteMessage(websocket.CloseMessage, []byte{})
+		c.Assert(err, IsNil)
+		fmt.Println("Publisher disconnected")
+		return
+	case <-t.C:
+		c.Fatal(
+			fmt.Sprintf(
+				"Test didn't receive all expected data! messages: %v",
+				sampleCounter,
+			))
+	}
+}
+
+func connect(u *url.URL) (c *connection) {
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+
+	if err != nil {
+		return nil
+	}
+
+	c = &connection{
+		send: channels.NewInfiniteChannel(),
+		ws:   conn,
+	}
+
+	return c
+}
+
 func setup() {
 	cache.Add(t1)
 	cache.Add(t2)
@@ -121,3 +261,4 @@ func push() {
 	cache.Append(t2, p1, cache.GenData())
 	cache.Append(t2, p2, cache.GenData())
 }
+
