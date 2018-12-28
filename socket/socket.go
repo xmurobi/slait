@@ -255,6 +255,8 @@ func (h *Hub) unsubscribe(s *subscription) {
 				}
 			}
 
+			cache.Remove(topic)
+
 			return true
 		})
 
