@@ -40,6 +40,22 @@ func (s *CacheTestSuite) TestCache(c *C) {
 	barRet = Get("bars", "AMD_bats", &barData[4].Timestamp, &barData[0].Timestamp, 0)
 	c.Assert(barRet, IsNil)
 
+	ht, hp := Has("a", "b")
+	c.Assert(ht, Equals, false)
+	c.Assert(hp, Equals, false)
+
+	ht, hp = Has("bars", "AMD_bats")
+	c.Assert(ht, Equals, true)
+	c.Assert(hp, Equals, true)
+
+	ht, hp = Has("bars1", "AMD_bats")
+	c.Assert(ht, Equals, false)
+	c.Assert(hp, Equals, false)
+
+	ht, hp = Has("bars", "AMD_batsxxx")
+	c.Assert(ht, Equals, true)
+	c.Assert(hp, Equals, false)
+
 	// Try to add an existing topic
 	err = Add("bars")
 	c.Assert(err, NotNil)

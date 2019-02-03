@@ -121,6 +121,20 @@ func (c *Cache) newPartition(topic, key string) (*Partition, error) {
 	}, err
 }
 
+func (c *Cache) has(topic, key string) (bool, bool) {
+	t, ok := c.topics.Load(topic)
+	if !ok {
+		return false, false
+	}
+	top := t.(*Topic)
+	_, ok1 := top.partitions.Load(key)
+	if !ok1 {
+		return true, false
+	}
+
+	return true, true
+}
+
 func (c *Cache) get(topic, key string, from, to *time.Time, last int) (entries Entries) {
 	t, ok := c.topics.Load(topic)
 	if !ok {
@@ -362,6 +376,10 @@ func Catalog() map[string]map[string]int {
 			return true
 		})
 	return catalog
+}
+
+func Has(topic, key string) (bool, bool) {
+	return masterCache.has(topic, key)
 }
 
 func Get(topic, key string, from, to *time.Time, last int) (entries Entries) {

@@ -92,6 +92,15 @@ type subscription struct {
 	done chan struct{}
 }
 
+func (s *subscription) buildPublicKey(topic, partition string) (key string) {
+	return fmt.Sprintf("%v::%v", topic, partition)
+}
+
+func (s *subscription) parsePublicKey(key string) (topic, partition string) {
+	keys := strings.Split(key, "::")
+	return keys[0], keys[1]
+}
+
 func (s *subscription) shouldReceive(topic, partition string) (should bool) {
 	s.m.Range(func(key interface{}, value interface{}) bool {
 		t := key.(string)
@@ -110,6 +119,36 @@ func (s *subscription) shouldReceive(topic, partition string) (should bool) {
 		}
 		return true
 	})
+	return should
+}
+
+func (s *subscription) shouldPublic(topic, partition string) (should bool) {
+	ht, hp := cache.Has(topic, partition)
+	should = true
+
+	if !ht || !hp {
+		// No topic or partition exist in main cache, which means no publisher for
+		// that topic/partition
+
+	} else {
+
+		// For each element in publications(publisher), the key of m sync.Map object
+		// presented like <topic>::<partition> (see func buildPublicKey). So each time a new
+		// publisher added to slait we need to check if other publishers contain the
+		// topic/partition in the it's m already. If yes(contain the topic/partition), false
+		// will be return, otherwise, return true
+		hub.publications.Range(func(key interface{}, value interface{}) bool {
+			pub := key.(*subscription)
+			if _, ok := pub.m.Load(s.buildPublicKey(topic, partition)); ok {
+				should = false
+				return false
+			}
+
+			should = true
+			return true
+		})
+	}
+
 	return should
 }
 
@@ -161,18 +200,18 @@ func (s *subscription) consume() {
 			occupied := false
 			closemsg := ""
 
-			hub.publications.Range(func(key interface{}, value interface{}) bool {
-				pub := key.(*subscription)
-				for _, p := range m.Partitions {
-					// Test if other publisher already occupy the topic/partition pair
-					if pub.shouldReceive(m.Topic, p) {
-						occupied = true
-						closemsg = fmt.Sprintf("Topic %v and Partition %v occupied by other publisher", m.Topic, p)
-						return false
-					}
+			// Check if other publisher publishing topic/partition already
+			for _, p := range m.Partitions {
+				if !s.shouldPublic(m.Topic, p) {
+					occupied = true
+					closemsg = fmt.Sprintf("Topic %v and Partition %v occupied by other publisher", m.Topic, p)
+					break
 				}
-				return true
-			})
+
+				// Build the inner sync.Map to log <topic>::<partition> pair for
+				// other publisher to check. This line is tricky
+				s.m.LoadOrStore(s.buildPublicKey(m.Topic, p), true)
+			}
 
 			if occupied {
 				// Notify the client that topic/partition pair already occupied
@@ -183,12 +222,7 @@ func (s *subscription) consume() {
 				s.cleanup(closemsg)
 				Log(INFO, "Rejected new publisher due to %v", closemsg)
 			} else {
-
-				val, loaded := s.m.LoadOrStore(m.Topic, m.Partitions)
-				if loaded {
-					partitions := val.([]string)
-					s.m.Store(m.Topic, append(partitions, m.Partitions...))
-				}
+				// Now we can allow this publisher to public it's topic/partitions
 				s.from = m.From
 
 				hub.subscribe(s, true)
@@ -245,21 +279,6 @@ func (h *Hub) unsubscribe(s *subscription) {
 
 		h.publications.Delete(s)
 
-		s.m.Range(func(key interface{}, value interface{}) bool {
-			topic := key.(string)
-			partitions := value.([]string)
-
-			if len(topic) > 0 && len(partitions) > 0 {
-				for _, p := range partitions {
-					cache.Update(topic, p, cache.RemovePartition)
-				}
-			}
-
-			cache.Remove(topic)
-
-			return true
-		})
-
 	}
 }
 
@@ -272,16 +291,15 @@ func (h *Hub) subscribe(s *subscription, isPublisher bool) {
 		h.publications.Store(s, true)
 
 		s.m.Range(func(key interface{}, value interface{}) bool {
-			topic := key.(string)
-			partitions := value.([]string)
+			t, p := s.parsePublicKey(key.(string))
+			ht, hp := cache.Has(t, p)
 
-			if len(topic) > 0 && len(partitions) > 0 {
+			if !ht {
+				cache.Add(t)
+			}
 
-				cache.Add(topic)
-
-				for _, p := range partitions {
-					cache.Update(topic, p, cache.AddPartition)
-				}
+			if !hp {
+				cache.Update(t, p, cache.AddPartition)
 			}
 
 			return true
@@ -417,4 +435,3 @@ func GetHandler() *SocketHandler {
 	sh := &SocketHandler{}
 	return sh
 }
-
