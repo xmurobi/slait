@@ -53,6 +53,9 @@ type Partition struct {
 }
 
 type Entry struct {
+	// Delivery timestamp(probably comes from publisher).
+	// If Timestamp is zero(publisher not provided), the current
+	// time.Now() will be filled by slait server
 	Timestamp time.Time
 	Data      json.RawMessage
 }
