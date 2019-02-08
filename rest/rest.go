@@ -18,11 +18,17 @@ import (
 func (rest REST) Start() error {
 	app := iris.New()
 
+	// rest
 	app.HandleMany("GET HEAD", "/heartbeat", HeartbeatHandler)
 	app.HandleMany("GET POST DELETE", "/topics", TopicsHandler)
 	app.HandleMany("GET PUT DELETE", "/topics/{topic:string}", TopicHandler)
 	app.HandleMany("GET PUT DELETE", "/topics/{topic:string}/{partition:string}", PartitionHandler)
-	app.Any("/ws", iris.FromStd(socket.GetHandler().Serve))
+
+	// websocket
+	wsh := socket.GetHandler()
+	app.HandleMany("GET", "/clients", wsh.ClientHandler)
+	app.Any("/ws", iris.FromStd(wsh.Serve))
+	
 	// profiling
 	app.Any("/debug/pprof/{action:path}", Profiler())
 

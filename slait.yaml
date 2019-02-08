@@ -1,5 +1,5 @@
 listen_port: 5994
-log_level: info
+log_level: warning
 data_dir: "data"
 trim_config:
   - topic: bars*

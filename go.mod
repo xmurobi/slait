@@ -15,6 +15,7 @@ require (
 	github.com/pkg/errors v0.8.0
 	github.com/xeipuuv/gojsonschema v0.0.0-20181016150526-f3a9dae5b194 // indirect
 	golang.org/x/crypto v0.0.0-20181106152344-bfa7d42eb568 // indirect
+	golang.org/x/net v0.0.0-20181102091132-c10e9556a7bc
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127
 	gopkg.in/yaml.v2 v2.2.1
 )

@@ -7,11 +7,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"github.com/alpacahq/slait/cache"
 	. "github.com/alpacahq/slait/utils/log"
 	"github.com/eapache/channels"
-
+	"github.com/kataras/iris"
 	"github.com/gorilla/websocket"
 )
 
@@ -427,6 +426,54 @@ func (sh *SocketHandler) Serve(w http.ResponseWriter, r *http.Request) {
 	}
 	go s.consume()
 	go s.produce()
+}
+
+func (sh *SocketHandler) ClientHandler(ctx iris.Context) {
+	switch ctx.Method() {
+	case "GET":
+		var clients []map[string]interface{}
+
+		hub.subscriptions.Range(func(key interface{}, value interface{}) bool {
+			sub := key.(*subscription)
+			if atomic.LoadUint32(&sub.conn.closed) < 1 {
+				c := make(map[string]interface{})
+				c["type"] = "subscriber"
+				c["address"] = sub.conn.ws.RemoteAddr().String()
+				
+				sub.m.Range(func(key interface{}, value interface{}) bool {
+					topic := key.(string)
+					partitions := value.([]string)
+					c[topic] = partitions
+					return true
+				})
+
+				clients = append(clients, c)
+			}
+			return true
+		})
+
+		hub.publications.Range(func(key interface{}, value interface{}) bool {
+			pub := key.(*subscription)
+			if atomic.LoadUint32(&pub.conn.closed) < 1 {
+				c := make(map[string]interface{})
+				c["type"] = "publisher"
+				c["address"] = pub.conn.ws.RemoteAddr().String()
+				
+				pub.m.Range(func(key interface{}, value interface{}) bool {
+					topic, partition := pub.parsePublicKey(key.(string))
+					c[topic] = partition
+					return true
+				})
+
+				clients = append(clients, c)
+			}
+			return true
+		})
+
+		ctx.StatusCode(iris.StatusOK)
+		ctx.ContentType("application/json")
+		ctx.JSON(clients)
+	}
 }
 
 // call only once

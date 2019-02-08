@@ -51,10 +51,10 @@ func SetLogLevel(level Level) {
 type Level int
 
 const (
-	FATAL Level = iota
-	ERROR
+	INFO Level = iota
 	WARNING
-	INFO
+	ERROR
+	FATAL
 )
 
 var logLevel Level
